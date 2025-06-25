@@ -8,3 +8,6 @@ The script was tested in firefox, I am not responsible for its performance on ot
 
 
 In order for the script to work, you need to go to the user's page (update it if necessary), and the Contribution Graph button will appear next to the star button.
+
+
+<img src="example.png" alt="example graph">
