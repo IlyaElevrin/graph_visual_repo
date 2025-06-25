@@ -9,6 +9,7 @@
 // @grant        GM_addStyle
 // @require      https://d3js.org/d3.v7.min.js
 // @connect      api.github.com
+// @license MIT
 // ==/UserScript==
 
 (function() {
