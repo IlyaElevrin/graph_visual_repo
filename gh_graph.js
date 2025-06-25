@@ -1,49 +1,41 @@
 // ==UserScript==
-// @name         GitHub Monthly Repo Graph
+// @name         GitHub Contribution Graph
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Граф репозиториев GitHub за последний месяц
-// @author       You
+// @version      2.0
+// @description  Visualizes GitHub repositories with recent contributions using API
+// @author       IlyaElevrin
 // @match        https://github.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @require      https://d3js.org/d3.v7.min.js
+// @connect      api.github.com
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    class MonthlyRepoGraph {
+    class ContributionGraph {
         constructor() {
-            this.username = this.getUsername();
-            this.init();
+            this.username = this._getUsername();
+            this.repos = [];
+            this._init();
         }
 
-        getUsername() {
-            return window.location.pathname.split('/')[1];
+        _getUsername() {
+            const pathParts = window.location.pathname.split('/');
+            return pathParts[1] || null;
         }
 
-        getDateRange() {
-            const endDate = new Date();
-            const startDate = new Date();
-            startDate.setMonth(endDate.getMonth() - 1);
-
-            return {
-                from: startDate.toISOString().split('T')[0],
-                to: endDate.toISOString().split('T')[0]
-            };
-        }
-
-        isProfilePage() {
+        _isProfilePage() {
             return !!document.querySelector('.js-profile-editable-area') &&
-                   !this.isLinkRepoPage();
+                   !this._isLinkRepoPage();
         }
 
-        isLinkRepoPage() {
+        _isLinkRepoPage() {
             return window.location.pathname.endsWith('/linkrepo');
         }
 
-        addNavItem() {
+        _addNavItem() {
             if (document.querySelector('#linkrepo-nav-item')) return;
 
             const navContainer = document.querySelector('.UnderlineNav-body') ||
@@ -60,7 +52,7 @@
 
             const span = document.createElement('span');
             span.className = 'UnderlineNav-item-label truncate';
-            span.textContent = 'Link repo (monthly)';
+            span.textContent = 'Contribution Graph';
 
             link.appendChild(span);
             navItem.appendChild(link);
@@ -73,7 +65,7 @@
             }
         }
 
-        createPage() {
+        _createFullscreenPage() {
             document.body.textContent = '';
 
             const app = document.createElement('div');
@@ -104,9 +96,7 @@
             title.id = 'graph-title';
             title.style.margin = '0';
             title.style.fontSize = '18px';
-
-            const dates = this.getDateRange();
-            title.textContent = `Repository Links (${dates.from} to ${dates.to})`;
+            title.textContent = `Contribution Graph: ${this.username} (last month)`;
 
             const closeBtn = document.createElement('button');
             closeBtn.id = 'graph-close';
@@ -134,36 +124,12 @@
                 left: 50%;
                 transform: translate(-50%, -50%);
                 font-size: 16px;
-                text-align: center;
             `;
-
-            const progress = document.createElement('div');
-            progress.className = 'progress';
-            progress.style.cssText = `
-                width: 300px;
-                height: 5px;
-                background: #e1e4e8;
-                border-radius: 3px;
-                margin: 10px auto;
-            `;
-
-            const progressBar = document.createElement('div');
-            progressBar.className = 'progress-bar';
-            progressBar.style.cssText = `
-                height: 100%;
-                background: #28a745;
-                border-radius: 3px;
-                width: 0%;
-                transition: width 0.3s;
-            `;
-
-            progress.appendChild(progressBar);
-            loading.appendChild(document.createTextNode('Loading activity data...'));
-            loading.appendChild(progress);
-            container.appendChild(loading);
+            loading.textContent = 'Loading repositories...';
 
             header.appendChild(title);
             header.appendChild(closeBtn);
+            container.appendChild(loading);
             app.appendChild(header);
             app.appendChild(container);
             document.body.appendChild(app);
@@ -173,29 +139,45 @@
             });
         }
 
-        async loadActivityData() {
-            const dates = this.getDateRange();
-            const url = `https://github.com/${this.username}?tab=overview&from=${dates.from}&to=${dates.to}`;
-
+        async _loadAllRepositories() {
+            const loading = document.querySelector('.loading');
             try {
-                const html = await this.fetchPage(url);
-                const repos = this.parseActivityData(html);
-                this.renderGraph(this.prepareGraphData(repos));
+                loading.textContent = 'Fetching recent contributions...';
+
+                //getting the user's events for the last month
+                const events = await this._fetchRecentEvents();
+
+                //extracting unique repositories from events
+                const repos = this._extractReposFromEvents(events);
+
+                if (repos.length > 0) {
+                    this._renderFullscreenGraph(this._prepareGraphData(repos));
+                } else {
+                    throw new Error('No recent contributions found');
+                }
             } catch (error) {
-                document.querySelector('.loading').textContent = `Error: ${error.message}`;
+                loading.textContent = `Error: ${error.message}`;
+                console.error(error);
             }
         }
 
-        fetchPage(url) {
+        async _fetchRecentEvents() {
+            const oneMonthAgo = new Date();
+            oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+            const sinceDate = oneMonthAgo.toISOString();
+
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
                     method: 'GET',
-                    url: url,
+                    url: `https://api.github.com/users/${this.username}/events?per_page=100`,
+                    headers: {
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
                     onload: function(response) {
                         if (response.status === 200) {
-                            resolve(response.responseText);
+                            resolve(JSON.parse(response.responseText));
                         } else {
-                            reject(new Error(`Failed to load page: ${response.status}`));
+                            reject(new Error(`Failed to load events: ${response.status}`));
                         }
                     },
                     onerror: reject
@@ -203,63 +185,35 @@
             });
         }
 
-        parseActivityData(html) {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
-            const repos = [];
+        _extractReposFromEvents(events) {
+            const reposMap = new Map();
 
-            //ищем TimelineItem с активностью
-            const timelineItems = doc.querySelectorAll('.TimelineItem');
-            let activityTimelineItem = null;
+            events.forEach(event => {
+                if (event.repo) {
+                    const [owner, name] = event.repo.name.split('/');
+                    const repoKey = `${owner}/${name}`;
 
-            for (const item of timelineItems) {
-                const body = item.querySelector('.TimelineItem-body');
-                if (body && body.textContent.includes('commits in')) {
-                    activityTimelineItem = item;
-                    break;
-                }
-            }
-
-            if (!activityTimelineItem) throw new Error('Activity timeline item not found');
-
-            //находим список репозиториев
-            const repoList = activityTimelineItem.querySelector('ul.list-style-none.mt-1');
-            if (!repoList) throw new Error('Repository list not found');
-
-            //парсим каждый элемент списка
-            const repoItems = repoList.querySelectorAll('li');
-            repoItems.forEach(item => {
-                const repoLink = item.querySelector('a[data-hovercard-type="repository"]');
-                if (!repoLink) return;
-
-                const fullName = repoLink.textContent.trim();
-                const progressBar = item.querySelector('.Progress');
-                const percentageText = progressBar?.getAttribute('aria-label')?.match(/(\d+)%/);
-                const percentage = percentageText ? parseInt(percentageText[1]) : 0;
-
-                if (fullName) {
-                    const [owner, name] = fullName.split('/');
-                    const isPersonal = owner === this.username;
-
-                    repos.push({
-                        owner,
-                        name,
-                        fullName,
-                        commits: percentage, //используем процент как относительное количество коммитов
-                        isPersonal
-                    });
+                    if (!reposMap.has(repoKey)) {
+                        reposMap.set(repoKey, {
+                            name,
+                            owner,
+                            isFork: false, //can't determine this from the events, can add an additional query.
+                            isPersonal: owner === this.username,
+                            lastActivity: new Date(event.created_at)
+                        });
+                    }
                 }
             });
 
-            return repos;
+            return Array.from(reposMap.values());
         }
 
-        prepareGraphData(repos) {
+        _prepareGraphData(repos) {
             const nodes = [];
             const links = [];
-            const orgs = new Set();
+            const orgs = new Map();
 
-            //добавляем пользователя как центральный узел
+            //central node is the user
             nodes.push({
                 id: this.username,
                 name: this.username,
@@ -267,7 +221,7 @@
                 size: 30
             });
 
-            //сначала обрабатываем организации
+            //add organizations
             repos.forEach(repo => {
                 if (!repo.isPersonal && !orgs.has(repo.owner)) {
                     nodes.push({
@@ -277,9 +231,8 @@
                         size: 25,
                         url: `https://github.com/${repo.owner}`
                     });
-                    orgs.add(repo.owner);
+                    orgs.set(repo.owner, true);
 
-                    //связь пользователь -> организация
                     links.push({
                         source: this.username,
                         target: repo.owner,
@@ -288,29 +241,31 @@
                 }
             });
 
-            //добавляем репозитории
+            // add repo
             repos.forEach(repo => {
+                const repoId = `${repo.owner}/${repo.name}`;
+
                 nodes.push({
-                    id: repo.fullName,
+                    id: repoId,
                     name: repo.name,
                     type: 'repo',
-                    size: 15 + Math.log(repo.commits + 1) * 3, //размер зависит от процента коммитов
-                    url: `https://github.com/${repo.fullName}`,
-                    commits: repo.commits
+                    fork: repo.isFork,
+                    size: 20,
+                    url: `https://github.com/${repoId}`,
+                    lastActivity: repo.lastActivity
                 });
 
-                //связь владелец -> репозиторий
                 links.push({
-                    source: repo.owner,
-                    target: repo.fullName,
-                    value: Math.min(repo.commits / 20, 5) //толщина связи зависит от процента
+                    source: repo.isPersonal ? this.username : repo.owner,
+                    target: repoId,
+                    value: 2
                 });
             });
 
             return { nodes, links };
         }
 
-        renderGraph(graphData) {
+        _renderFullscreenGraph(graphData) {
             const container = document.getElementById('graph-container');
             container.innerHTML = '';
 
@@ -331,22 +286,18 @@
             const g = svg.append('g');
 
             const simulation = d3.forceSimulation(graphData.nodes)
-                .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(d => {
-                    if (d.source.type === 'user') return 200;
-                    return 150;
-                }))
-                .force('charge', d3.forceManyBody().strength(-500))
+                .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(150))
+                .force('charge', d3.forceManyBody().strength(-400))
                 .force('center', d3.forceCenter(width / 2, height / 2))
-                .force('collision', d3.forceCollide().radius(d => d.size + 5));
+                .force('collision', d3.forceCollide().radius(d => d.size + 10));
 
             const link = g.append('g')
                 .attr('class', 'links')
                 .selectAll('line')
                 .data(graphData.links)
                 .enter().append('line')
-                .attr('stroke', d => d.source.type === 'user' ? '#6a737d' : '#586069')
-                .attr('stroke-width', d => d.value)
-                .attr('stroke-opacity', 0.8);
+                .attr('stroke', d => d.value === 1 ? '#6a737d' : '#586069')
+                .attr('stroke-width', d => d.value === 1 ? 1.5 : 2);
 
             const node = g.append('g')
                 .attr('class', 'nodes')
@@ -363,7 +314,7 @@
                 .attr('fill', d => {
                     if (d.type === 'user') return '#28a745';
                     if (d.type === 'org') return '#6f42c1';
-                    return '#0366d6';
+                    return d.fork ? '#6a737d' : '#0366d6';
                 })
                 .attr('stroke', '#fff')
                 .attr('stroke-width', 2)
@@ -375,11 +326,11 @@
                 .attr('class', 'node-text')
                 .text(d => d.name)
                 .attr('x', d => d.size + 5)
-                .attr('y', 4)
-                .attr('fill', '#fff')
-                .attr('font-size', '12px')
-                .attr('font-weight', 'bold')
-                .attr('text-shadow', '1px 1px 2px #000');
+                .attr('y', 4);
+
+            //adding tooltips with the date of the last activity
+            node.append('title')
+                .text(d => d.lastActivity ? `Last activity: ${new Date(d.lastActivity).toLocaleDateString()}` : '');
 
             simulation.on('tick', () => {
                 link
@@ -409,25 +360,25 @@
             }
         }
 
-        init() {
-            if (this.isProfilePage()) {
-                this.addNavItem();
-            } else if (this.isLinkRepoPage()) {
-                this.createPage();
-                this.loadActivityData();
+        _init() {
+            if (this._isProfilePage()) {
+                this._addNavItem();
+            } else if (this._isLinkRepoPage()) {
+                this._createFullscreenPage();
+                this._loadAllRepositories();
             }
         }
     }
 
     if (document.readyState === 'complete') {
-        new MonthlyRepoGraph();
+        new ContributionGraph();
     } else {
         window.addEventListener('load', () => {
-            new MonthlyRepoGraph();
+            new ContributionGraph();
         });
     }
 
     window.addEventListener('popstate', () => {
-        new MonthlyRepoGraph();
+        new ContributionGraph();
     });
 })();
